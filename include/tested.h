@@ -31,12 +31,14 @@
 //      you can use it on platform without dynamic memory and it would have no interfere with 
 //      leak detector you may want to use for your tests.
 //
+//  DONE:
+//     * don't use variants
+//
 //  TODO:
+//     * don't use optional
 //     * test filter by test name
 //     * test filter by callback
 //     * iterators
-//     * don't use variants
-//     * don't use optional
 //     * processcorrupted
 //     stop here
 //     * Async tests
@@ -48,8 +50,6 @@
 #include <array>
 #include <string_view>
 #include <algorithm>
-#include <variant>
-#include <optional>
 #include <stdio.h>
 
 // Compile time counter that helps to define test cases
@@ -193,6 +193,13 @@ struct CollectFailed final
    const char* FileName;
    Ordinal_t   Ordinal;
 
+   CollectFailed()
+      : Message(nullptr)
+      , GroupName(nullptr)
+      , FileName(nullptr)
+      , Ordinal()
+   {}
+
    CollectFailed(Ordinal_t ordinal, const char* message)
       : Message(message)
       , GroupName(nullptr)
@@ -207,7 +214,7 @@ struct Subset
 {
    static constexpr size_t kMaxGroupName = 64;
 
-   Subset()
+   Subset() : m_collectFailed(false)
    {
       m_GroupNameFilter[0] = 0;
    }
@@ -244,10 +251,10 @@ struct Subset
       bool IsPassed() const { return Failed == 0; }
    };
 
-   std::variant<RunInfo, CollectFailed> Run(IProgressEvents* progressEvents = nullptr) const
+   RunInfo Run(IProgressEvents* progressEvents = nullptr) const
    {
-      if (m_collectFailedError.has_value())
-         return *m_collectFailedError;
+	   if (m_collectFailed)
+		   throw m_collectFailedError;
 
       StdoutReporter consoleReporter;
       return RunParamChecked(progressEvents == nullptr ? &consoleReporter : progressEvents);
@@ -377,7 +384,8 @@ private:
    };
 
 protected:
-   std::optional<CollectFailed> m_collectFailedError;
+   bool          m_collectFailed;
+   CollectFailed m_collectFailedError;
 
    GroupListEntry* m_groupListHead;
    GroupListEntry* m_groupListTail;
@@ -404,6 +412,7 @@ struct Storage final: private Subset
 
    void AddCollectionError(const CollectFailed& cx)
    {
+      m_collectFailed = true;
       m_collectFailedError = cx;
    }
 

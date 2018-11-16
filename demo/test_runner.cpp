@@ -12,8 +12,8 @@ extern void LinkVectorTests();
 
 static void RegisterTests()
 {
-	LinkMathTests();
-	LinkVectorTests();
+   LinkMathTests();
+   LinkVectorTests();
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -21,60 +21,43 @@ static void RegisterTests()
 //-------------------------------------------------------------------------------------------------
 int main(int argc, const char* argv[])
 {
-	printf("RunTest: run all registered tests\n\n");
-	RegisterTests();
+   printf("RunTest: run all registered tests\n\n");
+   RegisterTests();
 
-	tested::Subset allTests = tested::Storage::Instance().GetAll();
-	//tested::Subset myGroup = allTests.ByGroupName("math");
+   tested::Subset allTests = tested::Storage::Instance().GetAll();
+   //tested::Subset myGroup = allTests.ByGroupName("math");
 
-	enum RetCode_t
-	{
-		RetCode_Ok = 0,
-		RetCode_TestsFailed,
-		RetCode_FailedToStart,
-	};
+   enum RetCode_t
+   {
+      RetCode_Ok = 0,
+      RetCode_TestsFailed,
+      RetCode_FailedToStart,
+   };
 
-	auto runResult = allTests.Run();
+   try
+   {
+      const tested::Subset::RunInfo runInfo = allTests.Run();
 
-	struct Visitor
-	{
-		void operator()(const tested::CollectFailed& collectFailed)
-		{
-			printf("Error: %s\n", collectFailed.Message);
-			printf("   In    '%s'\n", collectFailed.FileName);
-			printf("   Group '%s'\n", collectFailed.GroupName);
-			printf("   Case  #%d\n", collectFailed.Ordinal);
-			printf("\n");
+      printf("\n=======================================================================\n");
 
-			ReturnCode = RetCode_FailedToStart;
-		}
+      printf("Test run completed:\n");
+      printf("   Passed : %d\n", runInfo.Passed);
+      printf("   Skipped: %d\n", runInfo.Skipped);
+      printf("   Failed : %d\n", runInfo.Failed);
 
+      return (runInfo.Failed != 0) ? RetCode_TestsFailed : RetCode_Ok;
 
-		void operator()(const tested::Subset::RunInfo& runInfo)
-		{
-			printf("Test run completed:\n");
-			printf("   Passed : %d\n", runInfo.Passed);
-			printf("   Skipped: %d\n", runInfo.Skipped);
-			printf("   Failed : %d\n", runInfo.Failed);
+   }
+   catch (tested::CollectFailed& collectFailed)
+   {
+      printf("\n=======================================================================\n");
 
-			ReturnCode = (runInfo.Failed != 0) ? RetCode_TestsFailed : RetCode_Ok;
-		}
+      printf("Error: %s\n", collectFailed.Message);
+      printf("   In    '%s'\n", collectFailed.FileName);
+      printf("   Group '%s'\n", collectFailed.GroupName);
+      printf("   Case  #%d\n", collectFailed.Ordinal);
+      printf("\n");
 
-		enum RetCode_t
-		{
-			RetCode_Ok = 0,
-			RetCode_TestsFailed,
-			RetCode_FailedToStart,
-		};
-
-		RetCode_t ReturnCode;
-	};
-
-	Visitor visitor;
-
-	printf("\n=======================================================================\n");
-	std::visit(visitor, runResult);
-
-
-	return visitor.ReturnCode;
+      return RetCode_FailedToStart;
+   }
 }
