@@ -1,28 +1,23 @@
 //     
 //   \|/ Tested
-//    |  2018.07.28 Vladimir Zvezda
+//   /|\ 2018.07.28 Vladimir Zvezda
 //
 //  The front-end to the test cases library.
 //
 //  Motivation:
-//     * no macros when writing the test cases
+//     * no macros when defnining the test cases
 //     * minimize boilerplate code in test files
 //     * async test support (Emscripten, not yet ready)
-//     * no dynamic memory
+//     * no dynamic memory (bonus)
 //
 //  Design Ideas:
 //
 //    * minimal core API that about test cases registration and discovery. 
 //
-//      No advanced features like handling segfaults, mocks, XML/CI reports, sanitizers, 
-//      leak detection, performance measurements, etc. It could be built on top of this library, 
-//      either your project specific or a generic one.
-//
-//    * Written for C++17
-//
-//      There is nothing from C++17 here that can not be implemented in C++03, but it is 
-//      nice to have all these std::string_view, override, etc. It requires C++ exceptions 
-//      to be enabled, which is used as test case exit during the test discovery and runs.
+//      It does not provide advanced features like handling segfaults, mocks, XML/CI reports, 
+//      sanitizers, leak detection, performance measurements, etc because not every project
+//      needs this. Once you have test collected and registered, you can use a backend library
+//      where additional features are supported.
 //
 //    * No dynamic memory used in library
 //
@@ -31,26 +26,45 @@
 //      you can use it on platform without dynamic memory and it would have no interfere with 
 //      leak detector you may want to use for your tests.
 //
-//  DONE:
-//     * don't use variants
-//
 //  TODO:
-//     * don't use optional
+//     * name consistency
+//     * remove string_view
 //     * test filter by test name
 //     * test filter by callback
 //     * iterators
-//     * processcorrupted
 //     stop here
+//     * tags
 //     * Async tests
+//     * to c++03
 //     * Support parameters
 //     * How it works on Android/Emscripten/etc
 //
 #pragma once
 
-#include <array>
 #include <string_view>
 #include <algorithm>
 #include <stdio.h>
+#include <exception>
+#include <cstddef>
+
+// With C++17 it is possible 
+#ifdef __has_include
+#if __has_include("tested_config.h")
+#include "tested_config.h""
+#endif
+#endif
+
+#if __cplusplus <= 199711L
+#define tested_final 
+#define tested_override 
+#define tested_noexcept 
+#define tested_nullptr NULL
+#else
+#define tested_final final
+#define tested_override override
+#define tested_noexcept noexcept
+#define tested_nullptr nullptr
+#endif
 
 // Compile time counter that helps to define test cases
 #if defined (__COUNTER__)
@@ -80,8 +94,33 @@ enum CaseResult_t
 };
 
 // Type to use for test case number local to translation unit. It is safer to have it as small as
-// possible, because it is used in recursive type definition and static storage. 
+// possible, because it is used in recursive type definition and static storage. "signed char"
+// means that you can have about 127 tests in each translation unit.
 typedef signed char Ordinal_t;
+
+// Because of this "no dynamic memory" bravado, we need a convinient storage to keep some messages
+template <size_t SizeP>
+struct StringStorage
+{
+   enum { kMaxSize = SizeP };
+   char StorageBuf[SizeP];
+
+   StringStorage() { StorageBuf[0] = 0; }
+
+   StringStorage(std::string_view msg) { Assign(msg); }
+
+   void Assign(std::string_view msg)
+   {
+      const size_t maxSize = (std::min<size_t>)(SizeP, msg.length());
+      std::copy_n(msg.cbegin(), maxSize, StorageBuf);
+      StorageBuf[maxSize] = 0;
+   }
+   bool Empty() const { return StorageBuf[0] == 0; }
+   const size_t MaxSize() const { return SizeP; }
+
+   const char* CData() const { return StorageBuf; }
+   char* Data() { return StorageBuf; }
+};
 
 // This is the runtime API of 'tested' library avaiable to test case via parameter. There are two 
 // private implementation for this interface: one is to collect all test function and another is to 
@@ -92,6 +131,7 @@ struct IRuntime
    // storage with static lifetime as test name and description because API does not make the 
    // copy of the data.
    virtual void StartCase(const char* caseName, const char* description = nullptr) = 0;
+   // TODO: virtual callback StartAsyncCase();
 };
 
 // When app starts the test run, it provides impl of this interface to receive the progress of
@@ -112,28 +152,83 @@ struct IProgressEvents
    virtual void OnCaseDone(CaseResult_t code, const char* message = nullptr) = 0;
 };
 
+// Private exception classes
 struct CaseIsReal  {}; // thrown by StartCase() when Case<>() is specialized
 struct CaseIsStub  {}; // thrown by generic template of Case<>()
 struct CaseSkipped {}; // thrown by test case or size check
 
-// Exception thrown when a test case is failed
+// Private exception thrown when a test case is failed, e.g tested::Fail("Unexpected state")
 struct CaseFailed final
 {
-   // Because of goal of avoiding the dynamic memory we use a buffer for error
-   static constexpr size_t kMaxMessage = 1024;
-   std::array<char, kMaxMessage + 1> Message;
+   CaseFailed() {}
+   CaseFailed(std::string_view msg): Message(msg) {}
 
-   CaseFailed()
+   StringStorage<1024> Message;
+};
+
+// Base class for any exception thrown by Subset::Run(). Public API exception class.
+struct TestrunException: public std::exception
+{
+   const char* GroupName;
+   const char* FileName;
+   Ordinal_t   Ordinal;
+
+   TestrunException(Ordinal_t ordinal = Ordinal_t()) 
+      : GroupName(nullptr), FileName(nullptr), Ordinal(ordinal) {}
+
+   const char* what() const noexcept final { return GetFormattedMessage(); }
+
+protected:
+   virtual const char* GetFormattedMessage() const = 0;
+   mutable StringStorage<1024> m_formattedMessage;
+};
+
+// This is the public exception thrown when test case decided that process state is corrupted and 
+// there is no much sense to continue running the other tests.
+struct ProcessCorruptedException final: public TestrunException
+{
+   std::string CaseMessage;
+
+   ProcessCorruptedException(std::string_view message): CaseMessage(message)
+   {}
+
+private:
+   const char* GetFormattedMessage() const final
    {
-      Message[0] = 0;
+      snprintf(m_formattedMessage.Data(), m_formattedMessage.MaxSize(),
+         "ProcessCorrupted. Case message: %s. File: '%s', group : %s, case: #%d",
+         CaseMessage.c_str(), 
+         FileName ? FileName : "",
+         GroupName ? GroupName : "", 
+         Ordinal);
+
+      return m_formattedMessage.CData();
    }
+};
 
-   CaseFailed(std::string_view msg)
+// This is the public exception thrown when test cases collected failed, for example test case 
+// does not invoke StartCase() method on start.
+struct CollectFailedException final : public TestrunException
+{
+   const char* Message;
+
+   CollectFailedException() : Message(nullptr) {}
+
+   CollectFailedException(Ordinal_t ordinal, const char* message)
+      : TestrunException(ordinal), Message(message)
+   { }
+
+private:
+   const char* GetFormattedMessage() const final
    {
-      // like strncpy but guarantees zero terminatation (but not utf8-safe)
-      const size_t maxSize = (std::min)(kMaxMessage, msg.length());
-      std::copy_n(msg.cbegin(), maxSize, Message.begin());
-      Message[maxSize] = 0;
+      snprintf(m_formattedMessage.Data(), m_formattedMessage.MaxSize(),
+         "Failed to collect test cases: %s. File: '%s', group: %s, case: #%d",
+         Message ? Message : "",
+         FileName ? FileName : "",
+         GroupName ? GroupName : "", 
+         Ordinal);
+
+      return m_formattedMessage.CData();
    }
 };
 
@@ -156,10 +251,11 @@ inline void Eq(const ActualT& actual, const ExpectedT& expected, std::string_vie
       Fail(msg);
 }
 
-inline void Panic(std::string_view msg = std::string_view()) 
+// Test case invokes this to indicate that the current process state is compromised and no sense to
+// run other tests.
+inline void ProcessCorrupted(std::string_view msg = std::string_view())
 {
-   // TODO: hard mode
-   throw CaseFailed(msg);
+   throw ProcessCorruptedException(msg);
 }
 
 // Pointer to test case function
@@ -186,49 +282,17 @@ struct GroupListEntry
    {}
 };
 
-struct CollectFailed final
-{
-   const char* Message;
-   const char* GroupName;
-   const char* FileName;
-   Ordinal_t   Ordinal;
-
-   CollectFailed()
-      : Message(nullptr)
-      , GroupName(nullptr)
-      , FileName(nullptr)
-      , Ordinal()
-   {}
-
-   CollectFailed(Ordinal_t ordinal, const char* message)
-      : Message(message)
-      , GroupName(nullptr)
-      , FileName(nullptr)
-      , Ordinal(ordinal)
-   {}
-};
-
-
 // Subset: a reference to the tests
 struct Subset
 {
    static constexpr size_t kMaxGroupName = 64;
 
-   Subset() : m_collectFailed(false)
-   {
-      m_GroupNameFilter[0] = 0;
-   }
+   Subset() : m_isCollectFailed(false)  {}
 
    Subset ByGroupName(std::string_view name) const
    {
       Subset res = (*this);
-
-      auto last = std::copy_n(name.cbegin(), 
-         (std::min)(name.length(), kMaxGroupName - 1), 
-         res.m_GroupNameFilter.begin());
-
-      *last = 0;
-
+      res.m_groupNameFilter.Assign(name);
       return res;
    }
 
@@ -238,22 +302,23 @@ struct Subset
    }
    */
 
-   struct RunInfo
+   struct Stats
    {
       int Skipped;
       int Failed;
       int Passed;
 
-      RunInfo() : Skipped(0), Failed(0), Passed(0)
+      Stats() : Skipped(0), Failed(0), Passed(0)
       {}
 
       bool IsFailed() const { return Failed != 0; }
       bool IsPassed() const { return Failed == 0; }
    };
 
-   RunInfo Run(IProgressEvents* progressEvents = nullptr) const
+   // Runs the subset of tests. Can throw the ProcessCorrupted and CollectFailed exceptions.
+   Stats Run(IProgressEvents* progressEvents = nullptr) const
    {
-	   if (m_collectFailed)
+	   if (m_isCollectFailed)
 		   throw m_collectFailedError;
 
       StdoutReporter consoleReporter;
@@ -270,8 +335,7 @@ private:
          : m_progressEvents(progressEvents)
       {}
 
-      virtual void StartCase(const char* testName,
-         const char* description = nullptr) override final
+      void StartCase(const char* testName, const char* description = nullptr) final
       {
          IProgressEvents::StartedCase startedCase;
 
@@ -281,10 +345,10 @@ private:
       }
    };
 
-   RunInfo RunParamChecked(IProgressEvents* progressEvents) const
+   Stats RunParamChecked(IProgressEvents* progressEvents) const
    {
       Runtime runtime(progressEvents);
-      RunInfo result;
+      Stats result;
 
       GroupListEntry *groupCur = m_groupListHead;
       while (groupCur != nullptr)
@@ -298,28 +362,38 @@ private:
       return result;
    }
 
-   void RunGroup(Runtime& runtime, RunInfo& result, 
+   void RunGroup(Runtime& runtime, Stats& result, 
       IProgressEvents* progressEvents, GroupListEntry *groupCur) const
    {
       progressEvents->OnGroupStart(groupCur->Name, 0);
       CaseListEntry *cur = groupCur->CaseListHead;
-      while (cur != nullptr)
+      try
       {
-         RunOneCase(&runtime, progressEvents, cur, result);
-         cur = cur->Next;
+         while (cur != nullptr)
+         {
+            RunOneCase(&runtime, progressEvents, cur, result);
+            cur = cur->Next;
+         }
+      }
+      catch (ProcessCorruptedException& processCorrupted)
+      {
+         processCorrupted.FileName = groupCur->FileName;
+         processCorrupted.GroupName = groupCur->Name;
+         progressEvents->OnCaseDone(CaseResult_Failed, processCorrupted.what());
+         throw processCorrupted;
       }
    }
 
    bool GroupExcludedByFilter(GroupListEntry* group) const
    {
-      return m_GroupNameFilter[0] != 0
-         && strcmp(group->Name, m_GroupNameFilter.data()) == 0;
+      return !m_groupNameFilter.Empty()
+         && strcmp(group->Name, m_groupNameFilter.CData()) == 0;
    }
 
    void RunOneCase(Runtime* runtime,
       IProgressEvents* progressEvents, 
       CaseListEntry *caseEntry,
-      RunInfo& result) const
+      Stats& result) const
    {
       try
       {
@@ -333,10 +407,15 @@ private:
          progressEvents->OnCaseDone(CaseResult_Skipped);
          result.Skipped += 1;
       }
-      catch (CaseFailed& ex)
+      catch (const CaseFailed& ex)
       {
-         progressEvents->OnCaseDone(CaseResult_Failed, ex.Message.data());
+         progressEvents->OnCaseDone(CaseResult_Failed, ex.Message.CData());
          result.Failed += 1;
+      }
+      catch (ProcessCorruptedException& ex)
+      {
+         ex.Ordinal = caseEntry->Ordinal;
+         throw ex; // handled by upper level
       }
       catch (std::exception& ex)
       {
@@ -349,7 +428,7 @@ private:
    }
 
 private:
-   // The default progress reporter
+   // The default progress reporter to stdout. It makes the tested.h usable without any backend.
    struct StdoutReporter final: IProgressEvents  
    {
       void OnGroupStart(const char* groupName, int testsInGroup) override
@@ -374,7 +453,7 @@ private:
          printf("%02d:%s", m_currentCase.Ordinal, m_currentCase.Name);
          switch (code)
          {
-         case CaseResult_Passed:      printf(" PASSED\n");  break;
+         case CaseResult_Passed:  printf(" PASSED\n");  break;
          case CaseResult_Failed:  printf(" FAILED\n");  break;
          case CaseResult_Skipped: printf(" SKIPPED\n"); break;
          }
@@ -384,15 +463,14 @@ private:
    };
 
 protected:
-   bool          m_collectFailed;
-   CollectFailed m_collectFailedError;
+   bool m_isCollectFailed;
+   CollectFailedException m_collectFailedError;
 
    GroupListEntry* m_groupListHead;
    GroupListEntry* m_groupListTail;
 
-   std::array<char, kMaxGroupName> m_GroupNameFilter;
+   StringStorage<kMaxGroupName> m_groupNameFilter;
 };
-
 
 // This is the storage that actually 
 struct Storage final: private Subset
@@ -410,12 +488,13 @@ struct Storage final: private Subset
          m_groupListTail = m_groupListTail->Next;
    }
 
-   void AddCollectionError(const CollectFailed& cx)
+   void AddCollectionError(const CollectFailedException& cx)
    {
-      m_collectFailed = true;
+      m_isCollectFailed = true;
       m_collectFailedError = cx;
    }
 
+   // There is a static instance for the storage
    static Storage& Instance()
    {
       static Storage s_storage;
@@ -438,7 +517,7 @@ public:
          CaseListHead = collectCasesProc(nullptr);
          storage.AddGroup(this);
       }
-      catch (CollectFailed ex)
+      catch (CollectFailedException ex)
       {
          ex.GroupName = groupName;
          ex.FileName = fileName;
@@ -475,7 +554,7 @@ struct CaseCollector
       try
       {
          Case<N>(&collector);
-         throw CollectFailed(N, "Case does not started with StartTest()\n");
+         throw CollectFailedException(N, "Case body does not start with StartTest()");
       }
       catch (CaseIsStub)
       {
@@ -489,7 +568,7 @@ struct CaseCollector
          s_caseListEntry.Ordinal  = N;
          current = &s_caseListEntry;
       }
-      catch (const CollectFailed&)
+      catch (const CollectFailedException&)
       {
          throw;
       }
@@ -498,7 +577,7 @@ struct CaseCollector
          // Case function thrown something unexpected during the registration. The 
          // first thing case should do is invoke StartCase().
          // With C++11 and dynamic memory we can have exception captured std::current_exception()
-         throw CollectFailed(N, "Case throws something before StartCase()");
+         throw CollectFailedException(N, "Case throws something before StartCase()");
       }
 
       return CaseCollector<N - 1>::collect(current);

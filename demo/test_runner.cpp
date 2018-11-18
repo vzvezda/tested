@@ -5,7 +5,7 @@
 #include <stdio.h>
 
 //-------------------------------------------------------------------------------------------------
-//
+// We need to reference a symbol from test libraries or linker will not include test groups
 //-------------------------------------------------------------------------------------------------
 extern void LinkMathTests();
 extern void LinkVectorTests();
@@ -21,8 +21,9 @@ static void RegisterTests()
 //-------------------------------------------------------------------------------------------------
 int main(int argc, const char* argv[])
 {
-   printf("RunTest: run all registered tests\n\n");
    RegisterTests();
+
+   printf("test_runner: running all registered tests\n\n");
 
    tested::Subset allTests = tested::Storage::Instance().GetAll();
    //tested::Subset myGroup = allTests.ByGroupName("math");
@@ -36,7 +37,7 @@ int main(int argc, const char* argv[])
 
    try
    {
-      const tested::Subset::RunInfo runInfo = allTests.Run();
+      const tested::Subset::Stats runInfo = allTests.Run();
 
       printf("\n=======================================================================\n");
 
@@ -46,13 +47,21 @@ int main(int argc, const char* argv[])
       printf("   Failed : %d\n", runInfo.Failed);
 
       return (runInfo.Failed != 0) ? RetCode_TestsFailed : RetCode_Ok;
-
    }
-   catch (tested::CollectFailed& collectFailed)
+   catch (const tested::ProcessCorruptedException& processCorrupted)
+   {
+      printf("\n=======================================================================\n");
+      printf("Test case has reported that process state can be corrupted\n");
+      printf("   %s\n", processCorrupted.CaseMessage.c_str());
+      printf("   In    '%s'\n", processCorrupted.FileName);
+      printf("   Group '%s'\n", processCorrupted.GroupName);
+      printf("   Case  #%d\n", processCorrupted.Ordinal);
+   }
+   catch (const tested::CollectFailedException& collectFailed)
    {
       printf("\n=======================================================================\n");
 
-      printf("Error: %s\n", collectFailed.Message);
+      printf("Failed to collect test cases: %s\n", collectFailed.Message);
       printf("   In    '%s'\n", collectFailed.FileName);
       printf("   Group '%s'\n", collectFailed.GroupName);
       printf("   Case  #%d\n", collectFailed.Ordinal);
