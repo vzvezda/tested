@@ -4,9 +4,9 @@
 
 template<> void tested::Case<CASE_COUNTER>(tested::IRuntime* runner)
 {
-   runner->StartCase("EmptyByDefault");
+   runner->StartCase("emptiness");
 
-   tested::ProcessCorrupted("Sorry");
+   //tested::ProcessCorrupted("Sorry");
    //tested::Fail("Vector must be empty by default");
 
    std::vector<int> vec;
@@ -27,5 +27,5 @@ template<> void tested::Case<CASE_COUNTER>(tested::IRuntime* runner)
 
 void LinkVectorTests()
 {
-   static tested::Group x("vector", tested::CaseCollector<CASE_COUNTER>::collect, __FILE__);
+   static tested::Group x("std.vector", tested::CaseCollector<CASE_COUNTER>::collect, __FILE__);
 }

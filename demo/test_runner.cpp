@@ -5,7 +5,7 @@
 #include <stdio.h>
 
 //-------------------------------------------------------------------------------------------------
-// We need to reference a symbol from test libraries or linker will not include test groups
+// We need to reference a symbol from test libraries or linker strip test cases from executable
 //-------------------------------------------------------------------------------------------------
 extern void LinkMathTests();
 extern void LinkVectorTests();
@@ -23,21 +23,36 @@ int main(int argc, const char* argv[])
 {
    RegisterTests();
 
-   printf("test_runner: running all registered tests\n\n");
-
-   tested::Subset allTests = tested::Storage::Instance().GetAll();
-   //tested::Subset myGroup = allTests.ByGroupName("math");
-
-   enum RetCode_t
+   enum MainCode
    {
-      RetCode_Ok = 0,
-      RetCode_TestsFailed,
-      RetCode_FailedToStart,
+      MainCode_Ok = 0,
+      MainCode_TestsFailed,
+      MainCode_FailedToStart,
+      MainCode_FailedToParse,
    };
+
+   printf("test_runner: running all registered tests\n\n"); 
+
+
+   /*
+   'std.container.vector'
+   'std.container.list'
+   'std.vector:construction',
+   'std.vector:0'
+   */
+
+   //tested::Subset tests = tested::Storage::Instance().GetAll();
+   //tested::Subset tests = tested::Storage::Instance().ByGroupNameAndCaseNumber("std.vector", 0);
+   tested::Subset tests = tested::Storage::Instance().ByGroupAndCaseName("std.vector", "emptiness");
+
+   //tested::Subset myGroup = allTests.ByGroupName("math");
+   //tested::Subset myGroup = allTests.ByGroupAndCaseName("std.vector", "emptiness");
+   //tested::Subset myGroup = allTests.ByGroupAndCaseNumber("std.vector", 1);
+   //tested::Subset myGroup = allTests.ByAddress("std.vector:*");
 
    try
    {
-      const tested::Subset::Stats runInfo = allTests.Run();
+      const tested::Subset::Stats runInfo = tests.Run();
 
       printf("\n=======================================================================\n");
 
@@ -46,7 +61,7 @@ int main(int argc, const char* argv[])
       printf("   Skipped: %d\n", runInfo.Skipped);
       printf("   Failed : %d\n", runInfo.Failed);
 
-      return (runInfo.Failed != 0) ? RetCode_TestsFailed : RetCode_Ok;
+      return (runInfo.Failed != 0) ? MainCode_TestsFailed : MainCode_Ok;
    }
    catch (const tested::ProcessCorruptedException& processCorrupted)
    {
@@ -67,6 +82,6 @@ int main(int argc, const char* argv[])
       printf("   Case  #%d\n", collectFailed.Ordinal);
       printf("\n");
 
-      return RetCode_FailedToStart;
+      return MainCode_FailedToStart;
    }
 }

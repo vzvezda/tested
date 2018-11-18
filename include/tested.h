@@ -22,16 +22,16 @@
 //    * No dynamic memory used in library
 //
 //      It appeared that it is possible to go without dymanic memory and I took the opportunity.
-//      It has some downsides that it can increase the size of executable, but on the other side 
+//      It has some downsides that it can increase the size of executable, but on the other side   
 //      you can use it on platform without dynamic memory and it would have no interfere with 
 //      leak detector you may want to use for your tests.
 //
 //  TODO:
-//     * name consistency
+//     * filter by case name and number
+//     * dont allow ':' in group names
 //     * remove string_view
-//     * test filter by test name
 //     * test filter by callback
-//     * iterators
+//     * generic iteration
 //     stop here
 //     * tags
 //     * Async tests
@@ -47,7 +47,7 @@
 #include <exception>
 #include <cstddef>
 
-// With C++17 it is possible 
+// With C++17 it is possible to make some project specific configuration
 #ifdef __has_include
 #if __has_include("tested_config.h")
 #include "tested_config.h""
@@ -96,6 +96,7 @@ enum CaseResult_t
 // Type to use for test case number local to translation unit. It is safer to have it as small as
 // possible, because it is used in recursive type definition and static storage. "signed char"
 // means that you can have about 127 tests in each translation unit.
+// Ordinal should be signed type (-1 used as recursion end, code below compares it >= 0)
 typedef signed char Ordinal_t;
 
 // Because of this "no dynamic memory" bravado, we need a convinient storage to keep some messages
@@ -153,9 +154,10 @@ struct IProgressEvents
 };
 
 // Private exception classes
-struct CaseIsReal  {}; // thrown by StartCase() when Case<>() is specialized
-struct CaseIsStub  {}; // thrown by generic template of Case<>()
-struct CaseSkipped {}; // thrown by test case or size check
+struct CaseIsReal   {}; // thrown by StartCase() when Case<>() is specialized
+struct CaseIsStub   {}; // thrown by generic template of Case<>()
+struct CaseSkipped  {}; // thrown by test case or size check
+struct CaseFiltered {}; // thrown by StartCase() when case is not scheduled for execution
 
 // Private exception thrown when a test case is failed, e.g tested::Fail("Unexpected state")
 struct CaseFailed final
@@ -246,7 +248,8 @@ inline void Not(bool condition, std::string_view msg = "")    { FailIf(condition
 template <typename ActualT, typename ExpectedT>
 inline void Eq(const ActualT& actual, const ExpectedT& expected, std::string_view msg="")
 {
-   // TODO: write actual and expected?
+   // TODO: write actual and expected? It is difficult without dynamic memory
+   // TODO: don't use reference for trivial types?
    if (!(actual == expected))
       Fail(msg);
 }
@@ -287,20 +290,7 @@ struct Subset
 {
    static constexpr size_t kMaxGroupName = 64;
 
-   Subset() : m_isCollectFailed(false)  {}
-
-   Subset ByGroupName(std::string_view name) const
-   {
-      Subset res = (*this);
-      res.m_groupNameFilter.Assign(name);
-      return res;
-   }
-
-   /*
-   Subset ByCaseName(std::string_view) const
-   {
-   }
-   */
+   Subset() : m_isCollectFailed(false), m_caseNumberFilter(-1)  {}
 
    struct Stats
    {
@@ -329,16 +319,22 @@ private:
    struct Runtime final: IRuntime
    {
       IProgressEvents* m_progressEvents;
-      Ordinal_t m_currentTestOrdinal;
+      Ordinal_t        m_currentTestOrdinal;
+      const char*      m_caseNameFilter;
 
-      Runtime(IProgressEvents* progressEvents)
-         : m_progressEvents(progressEvents)
+      Runtime(IProgressEvents* progressEvents, const char* caseNameFilter)
+         : m_progressEvents(progressEvents), m_caseNameFilter(caseNameFilter)
       {}
 
       void StartCase(const char* testName, const char* description = nullptr) final
       {
-         IProgressEvents::StartedCase startedCase;
+         if (m_caseNameFilter[0] != 0 
+            && (testName == nullptr || strcmp(m_caseNameFilter, testName) != 0))
+         {
+            throw CaseFiltered();
+         }
 
+         IProgressEvents::StartedCase startedCase;
          startedCase.Name = testName;
          startedCase.Ordinal = m_currentTestOrdinal;
          m_progressEvents->OnCaseStart(startedCase);
@@ -347,7 +343,7 @@ private:
 
    Stats RunParamChecked(IProgressEvents* progressEvents) const
    {
-      Runtime runtime(progressEvents);
+      Runtime runtime(progressEvents, m_caseNameFilter.CData());
       Stats result;
 
       GroupListEntry *groupCur = m_groupListHead;
@@ -371,7 +367,8 @@ private:
       {
          while (cur != nullptr)
          {
-            RunOneCase(&runtime, progressEvents, cur, result);
+            if (!CaseExcludedByNumber(cur->Ordinal))
+               RunOneCase(&runtime, progressEvents, cur, result);
             cur = cur->Next;
          }
       }
@@ -384,10 +381,15 @@ private:
       }
    }
 
+   bool CaseExcludedByNumber(Ordinal_t caseNumber) const
+   {
+      return m_caseNumberFilter >= 0 && m_caseNumberFilter != caseNumber;
+   }
+
    bool GroupExcludedByFilter(GroupListEntry* group) const
    {
       return !m_groupNameFilter.Empty()
-         && strcmp(group->Name, m_groupNameFilter.CData()) == 0;
+         && strcmp(group->Name, m_groupNameFilter.CData()) != 0;
    }
 
    void RunOneCase(Runtime* runtime,
@@ -406,6 +408,11 @@ private:
       {
          progressEvents->OnCaseDone(CaseResult_Skipped);
          result.Skipped += 1;
+      }
+      catch (CaseFiltered)
+      {
+         // It is not really skipped, it just filtered out. E.g. if you run specific test it does 
+         // not mean that other tests skipped, they not run and not even counted in statistics.
       }
       catch (const CaseFailed& ex)
       {
@@ -469,13 +476,43 @@ protected:
    GroupListEntry* m_groupListHead;
    GroupListEntry* m_groupListTail;
 
+   friend struct Storage;
    StringStorage<kMaxGroupName> m_groupNameFilter;
+   StringStorage<kMaxGroupName> m_caseNameFilter;
+   Ordinal_t m_caseNumberFilter;
 };
 
 // This is the storage that actually 
 struct Storage final: private Subset
 {
    const Subset& GetAll() const { return *this; }
+
+   Subset ByGroupName(std::string_view groupName) const
+   {
+      Subset res = (*this);
+      res.m_groupNameFilter.Assign(groupName);
+      return res;
+   }
+
+   Subset ByGroupAndCaseName(std::string_view groupName, std::string_view caseName) const
+   {
+      Subset res = (*this);
+      res.m_groupNameFilter.Assign(groupName);
+      res.m_caseNameFilter.Assign(caseName);
+      return res;
+   }
+
+   Subset ByGroupNameAndCaseNumber(std::string_view groupName, Ordinal_t caseNumber) const
+   {
+      Subset res = (*this);
+      res.m_groupNameFilter.Assign(groupName);
+      res.m_caseNumberFilter = caseNumber;
+      return res;
+   }
+
+   Subset ByAddress(std::string_view address) const
+   {
+   }
 
    void AddGroup(GroupListEntry* newGroupEntry)
    {
