@@ -27,15 +27,18 @@
 //      leak detector you may want to use for your tests.
 //
 //  TODO:
-//     * filter by case name and number
+//     * case collection: nullptr as case name, duplicated names in group
+//     * unified iterations
+//     * export file name
+//     * test export
+//     * filter by address
 //     * dont allow ':' in group names
-//     * remove string_view
-//     * test filter by callback
 //     * generic iteration
 //     stop here
 //     * tags
 //     * Async tests
 //     * to c++03
+//     * remove string_view
 //     * Support parameters
 //     * How it works on Android/Emscripten/etc
 //
@@ -99,7 +102,7 @@ enum CaseResult_t
 // Ordinal should be signed type (-1 used as recursion end, code below compares it >= 0)
 typedef signed char Ordinal_t;
 
-// Because of this "no dynamic memory" bravado, we need a convinient storage to keep some messages
+// Because of this "no dynamic memory" bravado, here is a convinient storage to keep some messages
 template <size_t SizeP>
 struct StringStorage
 {
@@ -133,24 +136,6 @@ struct IRuntime
    // copy of the data.
    virtual void StartCase(const char* caseName, const char* description = nullptr) = 0;
    // TODO: virtual callback StartAsyncCase();
-};
-
-// When app starts the test run, it provides impl of this interface to receive the progress of
-// the test run.
-struct IProgressEvents
-{
-   virtual ~IProgressEvents() {}
-
-   virtual void OnGroupStart(const char* groupName, int testsInGroup) = 0;
-
-   struct StartedCase
-   {
-      const char* Name;
-      Ordinal_t   Ordinal;
-   };
-
-   virtual void OnCaseStart(StartedCase caseInfo) = 0;
-   virtual void OnCaseDone(CaseResult_t code, const char* message = nullptr) = 0;
 };
 
 // Private exception classes
@@ -288,9 +273,232 @@ struct GroupListEntry
 // Subset: a reference to the tests
 struct Subset
 {
-   static constexpr size_t kMaxGroupName = 64;
+   Subset() : m_isCollectFailed(false)  {}
 
-   Subset() : m_isCollectFailed(false), m_caseNumberFilter(-1)  {}
+   struct NameFilter
+   {
+      static constexpr size_t kMaxGroupName = 64;
+      static constexpr size_t kMaxCaseName = 64;
+      static constexpr size_t kMaxCaseAddress = 64;
+
+      enum FilterType_t
+      {
+         FilterType_None,
+         FilterType_GroupName,
+         FilterType_GroupNameCaseName,
+         FilterType_GroupNameCaseNumber,
+         FilterType_Address
+      };
+
+      FilterType_t FilterType;
+      union
+      {
+         struct
+         {
+            StringStorage<kMaxCaseName> m_caseNameFilter;
+            StringStorage<kMaxGroupName> m_groupNameFilter;
+            Ordinal_t m_caseNumberFilter;
+         };
+         struct
+         {
+            StringStorage<kMaxCaseAddress> m_addressFilter;
+         };
+      };
+
+      NameFilter() : FilterType() {}
+
+      void ByGroupName(std::string_view groupName)
+      {
+         FilterType = FilterType_GroupName;
+         m_groupNameFilter.Assign(groupName);
+      }
+
+      void ByGroupNameAndCaseName(std::string_view groupName, std::string_view caseName)
+      {
+         FilterType = FilterType_GroupNameCaseName;
+         m_groupNameFilter.Assign(groupName);
+         m_caseNameFilter.Assign(caseName);
+      }
+
+      void ByGroupNameAndCaseNumber(std::string_view groupName, Ordinal_t caseNumber)
+      {
+         FilterType = FilterType_GroupNameCaseNumber;
+         m_groupNameFilter.Assign(groupName);
+         m_caseNumberFilter = caseNumber;
+      }
+
+      void ByAddress(std::string_view address)
+      {
+         FilterType = FilterType_Address;
+         m_addressFilter.Assign(address);
+      }
+
+      bool CaseExcludedByName(const char* caseName) const
+      {
+         if (FilterType != FilterType_GroupNameCaseName)
+            return false;
+
+         const char* caseNameFilter = m_caseNameFilter.CData();
+         return strcmp(caseNameFilter, caseName) != 0;
+      }
+
+      bool CaseExcludedByNumber(Ordinal_t caseNumber) const
+      {
+         if (FilterType != FilterType_GroupNameCaseNumber)
+            return false;
+
+         return m_caseNumberFilter != caseNumber;
+      }
+
+      bool IsGroupNameFilter() const
+      {
+         switch (FilterType)
+         {
+         default: return false;
+
+         case FilterType_GroupName:
+         case FilterType_GroupNameCaseName:
+         case FilterType_GroupNameCaseNumber:
+            return true;
+         }
+      }
+
+      bool GroupExcludedByFilter(const char* groupName) const
+      {
+         if (!IsGroupNameFilter())
+            return false;
+
+         return strcmp(groupName, m_groupNameFilter.CData()) != 0;
+      }
+   };
+
+   struct Iterator
+   {
+      enum EventType_t { EventType_Group, EventType_Case, EventType_Done };
+
+      Iterator(GroupListEntry *startGroupItem, const NameFilter* nameFilter) 
+         : m_currentGroup(startGroupItem), m_nameFilter(nameFilter)
+      {
+         if (m_currentGroup == nullptr)
+         {
+            m_eventState = EventType_Done;
+         }
+         else
+         {
+            m_currentCase = m_currentGroup->CaseListHead;
+            m_eventState = EventType_Group;
+
+            // If there is a filter find the first group that matches it
+            if (nameFilter->GroupExcludedByFilter(m_currentGroup->Name))
+               NextGroup();
+         }
+      }
+
+      struct Event
+      {
+         EventType_t Type;
+         union
+         {
+            struct { const char* Name; } Group;
+            struct
+            {
+               CaseProc_t     CaseProc;
+               Ordinal_t      Ordinal;
+            } Case;
+         };
+
+         Event(EventType_t type = EventType_Done) : Type(type)
+         {}
+      };
+
+      void Next()
+      {
+         if (m_eventState == EventType_Done)
+            return;
+
+         if (m_eventState == EventType_Group)
+         {
+            m_currentCase = m_currentGroup->CaseListHead;
+
+            // if there are no tests in the current group we can start move to a next group
+            if (m_currentCase == nullptr)
+            {
+               NextGroup();
+               return;
+            }
+
+            if (m_nameFilter->CaseExcludedByNumber(m_currentCase->Ordinal))
+            {
+               NextCase();
+               return;
+            }
+
+            m_eventState = EventType_Case;
+            return;
+         }
+
+         // implying (m_eventState == EventType_Case)
+         NextCase();
+      }
+
+      Event Get()
+      {
+         Event currentEvent(m_eventState);
+         if (m_eventState == EventType_Group)
+            currentEvent.Group.Name = m_currentGroup->Name;
+
+         if (m_eventState == EventType_Case)
+         {
+            currentEvent.Case.CaseProc = m_currentCase->CaseProc;
+            currentEvent.Case.Ordinal = m_currentCase->Ordinal;
+         }
+
+         return currentEvent;
+      }
+
+   private:
+
+      void NextGroup()
+      {
+         m_currentGroup = m_currentGroup->Next;
+         while (m_currentGroup != nullptr)
+         {
+            if (!m_nameFilter->GroupExcludedByFilter(m_currentGroup->Name))
+            {
+               m_eventState = EventType_Group;
+               return;
+            }
+            m_currentGroup = m_currentGroup->Next;
+         }
+
+         m_eventState = EventType_Done;
+         return; // no more groups left
+      }
+
+      void NextCase()
+      {
+         // Move to the next case
+         m_currentCase = m_currentCase->Next;
+         while (m_currentCase != nullptr)
+         {
+            if (!m_nameFilter->CaseExcludedByNumber(m_currentCase->Ordinal))
+            {
+               m_eventState = EventType_Case;
+               return;
+            }
+
+            m_currentCase = m_currentCase->Next;
+         }
+
+         // If no case is in the group, move to the next group
+         NextGroup();
+      }
+
+      GroupListEntry *m_currentGroup;
+      CaseListEntry  *m_currentCase;
+      const NameFilter *m_nameFilter;
+      EventType_t     m_eventState;
+   };
 
    struct Stats
    {
@@ -305,8 +513,41 @@ struct Subset
       bool IsPassed() const { return Failed == 0; }
    };
 
+   // When app starts the run of subset of tests, it provides impl of this interface to receive 
+   // the event about how test run is going
+   struct IRunObserver
+   {
+      virtual void OnGroupStart(const char* groupName) = 0;
+
+      struct StartedCase
+      {
+         const char* Name;
+         Ordinal_t   Ordinal;
+      };
+
+      virtual void OnCaseStart(StartedCase caseInfo) = 0;
+      virtual void OnCaseDone(CaseResult_t code, const char* message = nullptr) = 0;
+   };
+
+   struct ICaseExporter
+   {
+      struct ExportedCase
+      {
+         const char* CaseName;
+         Ordinal_t   CaseNumber;
+         CaseProc_t  CaseProc;
+      };
+
+      // App can throw this in one of the handles below and export would be stopped
+      struct ExportStopped {};
+
+      virtual void OnGroup(const char* GroupName) = 0;
+      virtual void OnCase(const ExportedCase& testCase) = 0;
+      virtual void OnDone() = 0;
+   };
+
    // Runs the subset of tests. Can throw the ProcessCorrupted and CollectFailed exceptions.
-   Stats Run(IProgressEvents* progressEvents = nullptr) const
+   Stats Run(IRunObserver* progressEvents = nullptr)
    {
 	   if (m_isCollectFailed)
 		   throw m_collectFailedError;
@@ -315,130 +556,178 @@ struct Subset
       return RunParamChecked(progressEvents == nullptr ? &consoleReporter : progressEvents);
    }
 
-private:
-   struct Runtime final: IRuntime
+   Stats RunParamChecked(IRunObserver* testRunProgress) 
    {
-      IProgressEvents* m_progressEvents;
-      Ordinal_t        m_currentTestOrdinal;
-      const char*      m_caseNameFilter;
+      Iterator it(m_groupListHead, &m_nameFilter);
+      Runtime runtime(testRunProgress, &m_nameFilter);
 
-      Runtime(IProgressEvents* progressEvents, const char* caseNameFilter)
-         : m_progressEvents(progressEvents), m_caseNameFilter(caseNameFilter)
+      while(true)
+      {
+         const Iterator::Event ev = it.Get();
+         if (ev.Type == Iterator::EventType_Done)
+            break;
+
+         if (ev.Type == Iterator::EventType_Group)
+            testRunProgress->OnGroupStart(ev.Group.Name);
+
+         if (ev.Type == Iterator::EventType_Case)
+            runtime.RunOneCase(ev.Case.CaseProc, ev.Case.Ordinal);
+
+         it.Next();
+      }
+
+      return runtime.m_result;
+   }
+
+   struct ExportRuntime final: IRuntime
+   {
+      ICaseExporter*  m_pExporter;
+      Ordinal_t   m_currentTestOrdinal;
+      const char* m_caseNameFilter;
+      CaseProc_t  m_currentCaseProc;
+      NameFilter *m_nameFilter;
+
+
+      ExportRuntime(ICaseExporter* pExporter, NameFilter* nameFilter)
+         : m_pExporter(pExporter), m_nameFilter(nameFilter)
       {}
 
       void StartCase(const char* testName, const char* description = nullptr) final
       {
-         if (m_caseNameFilter[0] != 0 
-            && (testName == nullptr || strcmp(m_caseNameFilter, testName) != 0))
-         {
+         if (m_nameFilter->CaseExcludedByName(testName))
             throw CaseFiltered();
-         }
 
-         IProgressEvents::StartedCase startedCase;
+         ICaseExporter::ExportedCase exportedCase;
+         exportedCase.CaseName = testName;
+         exportedCase.CaseNumber = m_currentTestOrdinal;
+         exportedCase.CaseProc = m_currentCaseProc;
+
+         m_pExporter->OnCase(exportedCase);
+         throw CaseIsReal();
+      }
+
+      void ExportOneCase(CaseProc_t caseProc, Ordinal_t ordinal)
+      {
+         try
+         {
+            m_currentTestOrdinal = ordinal;
+            m_currentCaseProc = caseProc;
+            caseProc(this);
+            throw CollectFailedException(ordinal, "Case body does not start with StartTest()");
+         }
+         catch (const CaseFiltered&)
+         {
+         }
+         catch (const CaseIsReal&)
+         {
+         }
+         catch (std::exception&)
+         {
+            throw CollectFailedException(ordinal, "??Case body does not start with StartTest()");
+         }
+         catch (...)
+         {
+            throw CollectFailedException(ordinal, "???Case body does not start with StartTest()");
+         }
+      }
+
+   };
+
+   void Export(ICaseExporter* exporter)
+   {
+      Iterator it(m_groupListHead, &m_nameFilter);
+      ExportRuntime runtime(exporter, &m_nameFilter);
+
+      while(true)
+      {
+         const Iterator::Event ev = it.Get();
+         if (ev.Type == Iterator::EventType_Done)
+            break;
+
+         if (ev.Type == Iterator::EventType_Group)
+            exporter->OnGroup(ev.Group.Name);
+
+         if (ev.Type == Iterator::EventType_Case)
+            runtime.ExportOneCase(ev.Case.CaseProc, ev.Case.Ordinal);
+
+         it.Next();
+      }
+
+      exporter->OnDone();
+   }
+
+
+private:
+   struct Runtime final: IRuntime
+   {
+      IRunObserver* m_runObserver;
+      Ordinal_t     m_currentTestOrdinal;
+      const char*   m_caseNameFilter;
+      Stats         m_result;
+      NameFilter   *m_pNameFilterRef;
+
+      Runtime(IRunObserver* progressEvents, NameFilter* pNameFilterRef)
+         : m_runObserver(progressEvents), m_pNameFilterRef(pNameFilterRef)
+      {
+      }
+
+      void StartCase(const char* testName, const char* description = nullptr) final
+      {
+         if (m_pNameFilterRef->CaseExcludedByName(testName))
+            throw CaseFiltered();
+
+         IRunObserver::StartedCase startedCase;
          startedCase.Name = testName;
          startedCase.Ordinal = m_currentTestOrdinal;
-         m_progressEvents->OnCaseStart(startedCase);
+         m_runObserver->OnCaseStart(startedCase);
+      }
+
+      void RunOneCase(CaseProc_t caseProc, Ordinal_t ordinal)
+      {
+         try
+         {
+            m_currentTestOrdinal = ordinal;
+            caseProc(this);
+            m_runObserver->OnCaseDone(CaseResult_Passed);
+            m_result.Passed += 1;
+         }
+         catch (CaseSkipped)
+         {
+            m_runObserver->OnCaseDone(CaseResult_Skipped);
+            m_result.Skipped += 1;
+         }
+         catch (CaseFiltered)
+         {
+            // It is not really skipped, it just filtered out. E.g. if you run specific test it 
+            // does not mean that other tests skipped, they not run and not even counted in 
+            // statistics.
+         }
+         catch (const CaseFailed& ex)
+         {
+            m_runObserver->OnCaseDone(CaseResult_Failed, ex.Message.CData());
+            m_result.Failed += 1;
+         }
+         catch (ProcessCorruptedException& ex)
+         {
+            ex.Ordinal = ordinal;
+            throw ex; // handled by upper level
+         }
+         catch (std::exception& ex)
+         {
+            m_runObserver->OnCaseDone(CaseResult_Failed, ex.what());
+         }
+         catch (...)
+         {
+            m_runObserver->OnCaseDone(CaseResult_Failed, "Unknown exception");
+         }
       }
    };
 
-   Stats RunParamChecked(IProgressEvents* progressEvents) const
-   {
-      Runtime runtime(progressEvents, m_caseNameFilter.CData());
-      Stats result;
-
-      GroupListEntry *groupCur = m_groupListHead;
-      while (groupCur != nullptr)
-      {
-         if (!GroupExcludedByFilter(groupCur))
-            RunGroup(runtime, result, progressEvents, groupCur);
-
-         groupCur = groupCur->Next;
-      }
-
-      return result;
-   }
-
-   void RunGroup(Runtime& runtime, Stats& result, 
-      IProgressEvents* progressEvents, GroupListEntry *groupCur) const
-   {
-      progressEvents->OnGroupStart(groupCur->Name, 0);
-      CaseListEntry *cur = groupCur->CaseListHead;
-      try
-      {
-         while (cur != nullptr)
-         {
-            if (!CaseExcludedByNumber(cur->Ordinal))
-               RunOneCase(&runtime, progressEvents, cur, result);
-            cur = cur->Next;
-         }
-      }
-      catch (ProcessCorruptedException& processCorrupted)
-      {
-         processCorrupted.FileName = groupCur->FileName;
-         processCorrupted.GroupName = groupCur->Name;
-         progressEvents->OnCaseDone(CaseResult_Failed, processCorrupted.what());
-         throw processCorrupted;
-      }
-   }
-
-   bool CaseExcludedByNumber(Ordinal_t caseNumber) const
-   {
-      return m_caseNumberFilter >= 0 && m_caseNumberFilter != caseNumber;
-   }
-
-   bool GroupExcludedByFilter(GroupListEntry* group) const
-   {
-      return !m_groupNameFilter.Empty()
-         && strcmp(group->Name, m_groupNameFilter.CData()) != 0;
-   }
-
-   void RunOneCase(Runtime* runtime,
-      IProgressEvents* progressEvents, 
-      CaseListEntry *caseEntry,
-      Stats& result) const
-   {
-      try
-      {
-         runtime->m_currentTestOrdinal = caseEntry->Ordinal;
-         caseEntry->CaseProc(runtime);
-         progressEvents->OnCaseDone(CaseResult_Passed);
-         result.Passed += 1;
-      }
-      catch (CaseSkipped)
-      {
-         progressEvents->OnCaseDone(CaseResult_Skipped);
-         result.Skipped += 1;
-      }
-      catch (CaseFiltered)
-      {
-         // It is not really skipped, it just filtered out. E.g. if you run specific test it does 
-         // not mean that other tests skipped, they not run and not even counted in statistics.
-      }
-      catch (const CaseFailed& ex)
-      {
-         progressEvents->OnCaseDone(CaseResult_Failed, ex.Message.CData());
-         result.Failed += 1;
-      }
-      catch (ProcessCorruptedException& ex)
-      {
-         ex.Ordinal = caseEntry->Ordinal;
-         throw ex; // handled by upper level
-      }
-      catch (std::exception& ex)
-      {
-         progressEvents->OnCaseDone(CaseResult_Failed, ex.what());
-      }
-      catch (...)
-      {
-         progressEvents->OnCaseDone(CaseResult_Failed, "Unknown exception");
-      }
-   }
-
 private:
    // The default progress reporter to stdout. It makes the tested.h usable without any backend.
-   struct StdoutReporter final: IProgressEvents  
+   struct StdoutReporter final: IRunObserver  
    {
-      void OnGroupStart(const char* groupName, int testsInGroup) override
+      void OnGroupStart(const char* groupName) override
       {
          printf("\n%s [group]\n", groupName);
          printf("-----------------------------------------------------------------------\n\n");
@@ -476,10 +765,8 @@ protected:
    GroupListEntry* m_groupListHead;
    GroupListEntry* m_groupListTail;
 
+   NameFilter m_nameFilter;
    friend struct Storage;
-   StringStorage<kMaxGroupName> m_groupNameFilter;
-   StringStorage<kMaxGroupName> m_caseNameFilter;
-   Ordinal_t m_caseNumberFilter;
 };
 
 // This is the storage that actually 
@@ -490,28 +777,29 @@ struct Storage final: private Subset
    Subset ByGroupName(std::string_view groupName) const
    {
       Subset res = (*this);
-      res.m_groupNameFilter.Assign(groupName);
+      res.m_nameFilter.ByGroupName(groupName);
       return res;
    }
 
-   Subset ByGroupAndCaseName(std::string_view groupName, std::string_view caseName) const
+   Subset ByGroupNameAndCaseName(std::string_view groupName, std::string_view caseName) const
    {
       Subset res = (*this);
-      res.m_groupNameFilter.Assign(groupName);
-      res.m_caseNameFilter.Assign(caseName);
+      res.m_nameFilter.ByGroupNameAndCaseName(groupName, caseName);
       return res;
    }
 
    Subset ByGroupNameAndCaseNumber(std::string_view groupName, Ordinal_t caseNumber) const
    {
       Subset res = (*this);
-      res.m_groupNameFilter.Assign(groupName);
-      res.m_caseNumberFilter = caseNumber;
+      res.m_nameFilter.ByGroupNameAndCaseNumber(groupName, caseNumber);
       return res;
    }
 
    Subset ByAddress(std::string_view address) const
    {
+      Subset res = (*this);
+      res.m_nameFilter.ByAddress(address);
+      return res;
    }
 
    void AddGroup(GroupListEntry* newGroupEntry)

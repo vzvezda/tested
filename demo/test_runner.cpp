@@ -16,6 +16,25 @@ static void RegisterTests()
    LinkVectorTests();
 }
 
+class ExporterImpl final: public tested::Subset::ICaseExporter
+{
+public:
+   virtual void OnGroup(const char* GroupName)
+   {
+      printf("Group: %s\n", GroupName);
+   }
+
+   virtual void OnCase(const ExportedCase& testCase)
+   {
+      printf("Test: %s %d %p\n", testCase.CaseName, testCase.CaseNumber, testCase.CaseProc);
+   }
+
+   virtual void OnDone() 
+   {
+      printf("Done\n");
+   }
+};
+
 //-------------------------------------------------------------------------------------------------
 //
 //-------------------------------------------------------------------------------------------------
@@ -41,27 +60,34 @@ int main(int argc, const char* argv[])
    'std.vector:0'
    */
 
-   //tested::Subset tests = tested::Storage::Instance().GetAll();
+   tested::Subset tests = tested::Storage::Instance().GetAll();
    //tested::Subset tests = tested::Storage::Instance().ByGroupNameAndCaseNumber("std.vector", 0);
-   tested::Subset tests = tested::Storage::Instance().ByGroupAndCaseName("std.vector", "emptiness");
+   //tested::Subset tests = tested::Storage::Instance().ByGroupNameAndCaseName("std.vector", "emptiness");
+   //tested::Subset tests = tested::Storage::Instance().ByAddress("std.vector:*");
+   //tested::Subset tests = tested::Storage::Instance().ByGroupName("math");
 
-   //tested::Subset myGroup = allTests.ByGroupName("math");
    //tested::Subset myGroup = allTests.ByGroupAndCaseName("std.vector", "emptiness");
    //tested::Subset myGroup = allTests.ByGroupAndCaseNumber("std.vector", 1);
    //tested::Subset myGroup = allTests.ByAddress("std.vector:*");
 
    try
    {
-      const tested::Subset::Stats runInfo = tests.Run();
+      //const tested::Subset::Stats runInfo = tests.Run();
+
+      ExporterImpl exporter;
+      tests.Export(&exporter);
 
       printf("\n=======================================================================\n");
 
+      /*
       printf("Test run completed:\n");
       printf("   Passed : %d\n", runInfo.Passed);
       printf("   Skipped: %d\n", runInfo.Skipped);
       printf("   Failed : %d\n", runInfo.Failed);
 
       return (runInfo.Failed != 0) ? MainCode_TestsFailed : MainCode_Ok;
+      */
+      return 0;
    }
    catch (const tested::ProcessCorruptedException& processCorrupted)
    {
