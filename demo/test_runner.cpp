@@ -19,9 +19,9 @@ static void RegisterTests()
 class ExporterImpl final: public tested::Subset::ICaseExporter
 {
 public:
-   virtual void OnGroup(const char* GroupName)
+   virtual void OnGroup(const char* groupName, const char* fileName)
    {
-      printf("Group: %s\n", GroupName);
+      printf("Group: %s (%s)\n", groupName, fileName);
    }
 
    virtual void OnCase(const ExportedCase& testCase)

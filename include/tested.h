@@ -5,7 +5,7 @@
 //  The front-end to the test cases library.
 //
 //  Motivation:
-//     * no macros when defnining the test cases
+//     * no macros when defining the test cases
 //     * minimize boilerplate code in test files
 //     * async test support (Emscripten, not yet ready)
 //     * no dynamic memory (bonus)
@@ -27,20 +27,11 @@
 //      leak detector you may want to use for your tests.
 //
 //  TODO:
-//     * case collection: nullptr as case name, duplicated names in group
-//     * unified iterations
-//     * export file name
-//     * test export
-//     * filter by address
-//     * dont allow ':' in group names
-//     * generic iteration
-//     stop here
 //     * tags
+//     * runtime customization 
 //     * Async tests
 //     * to c++03
-//     * remove string_view
-//     * Support parameters
-//     * How it works on Android/Emscripten/etc
+//     * Emscripten demo
 //
 #pragma once
 
@@ -327,12 +318,6 @@ struct Subset
          m_caseNumberFilter = caseNumber;
       }
 
-      void ByAddress(std::string_view address)
-      {
-         FilterType = FilterType_Address;
-         m_addressFilter.Assign(address);
-      }
-
       bool CaseExcludedByName(const char* caseName) const
       {
          if (FilterType != FilterType_GroupNameCaseName)
@@ -399,7 +384,11 @@ struct Subset
          EventType_t Type;
          union
          {
-            struct { const char* Name; } Group;
+            struct 
+            { 
+               const char* Name; 
+               const char* FileName;
+            } Group;
             struct
             {
                CaseProc_t     CaseProc;
@@ -445,7 +434,10 @@ struct Subset
       {
          Event currentEvent(m_eventState);
          if (m_eventState == EventType_Group)
+         {
             currentEvent.Group.Name = m_currentGroup->Name;
+            currentEvent.Group.FileName = m_currentGroup->FileName;
+         }
 
          if (m_eventState == EventType_Case)
          {
@@ -541,13 +533,13 @@ struct Subset
       // App can throw this in one of the handles below and export would be stopped
       struct ExportStopped {};
 
-      virtual void OnGroup(const char* GroupName) = 0;
+      virtual void OnGroup(const char* groupName, const char* caseName) = 0;
       virtual void OnCase(const ExportedCase& testCase) = 0;
       virtual void OnDone() = 0;
    };
 
    // Runs the subset of tests. Can throw the ProcessCorrupted and CollectFailed exceptions.
-   Stats Run(IRunObserver* progressEvents = nullptr)
+   Stats Run(IRunObserver* progressEvents = nullptr) noexcept(false)
    {
 	   if (m_isCollectFailed)
 		   throw m_collectFailedError;
@@ -556,6 +548,34 @@ struct Subset
       return RunParamChecked(progressEvents == nullptr ? &consoleReporter : progressEvents);
    }
 
+   void Export(ICaseExporter* exporter) noexcept(false)
+   {
+	   if (m_isCollectFailed)
+		   throw m_collectFailedError;
+
+      Iterator it(m_groupListHead, &m_nameFilter);
+      ExportRuntime runtime(exporter, &m_nameFilter);
+
+      while(true)
+      {
+         const Iterator::Event ev = it.Get();
+         if (ev.Type == Iterator::EventType_Done)
+            break;
+
+         if (ev.Type == Iterator::EventType_Group)
+            exporter->OnGroup(ev.Group.Name, ev.Group.FileName);
+
+         if (ev.Type == Iterator::EventType_Case)
+            runtime.ExportOneCase(ev.Case.CaseProc, ev.Case.Ordinal);
+
+         it.Next();
+      }
+
+      exporter->OnDone();
+   }
+
+
+private:
    Stats RunParamChecked(IRunObserver* testRunProgress) 
    {
       Iterator it(m_groupListHead, &m_nameFilter);
@@ -579,85 +599,6 @@ struct Subset
       return runtime.m_result;
    }
 
-   struct ExportRuntime final: IRuntime
-   {
-      ICaseExporter*  m_pExporter;
-      Ordinal_t   m_currentTestOrdinal;
-      const char* m_caseNameFilter;
-      CaseProc_t  m_currentCaseProc;
-      NameFilter *m_nameFilter;
-
-
-      ExportRuntime(ICaseExporter* pExporter, NameFilter* nameFilter)
-         : m_pExporter(pExporter), m_nameFilter(nameFilter)
-      {}
-
-      void StartCase(const char* testName, const char* description = nullptr) final
-      {
-         if (m_nameFilter->CaseExcludedByName(testName))
-            throw CaseFiltered();
-
-         ICaseExporter::ExportedCase exportedCase;
-         exportedCase.CaseName = testName;
-         exportedCase.CaseNumber = m_currentTestOrdinal;
-         exportedCase.CaseProc = m_currentCaseProc;
-
-         m_pExporter->OnCase(exportedCase);
-         throw CaseIsReal();
-      }
-
-      void ExportOneCase(CaseProc_t caseProc, Ordinal_t ordinal)
-      {
-         try
-         {
-            m_currentTestOrdinal = ordinal;
-            m_currentCaseProc = caseProc;
-            caseProc(this);
-            throw CollectFailedException(ordinal, "Case body does not start with StartTest()");
-         }
-         catch (const CaseFiltered&)
-         {
-         }
-         catch (const CaseIsReal&)
-         {
-         }
-         catch (std::exception&)
-         {
-            throw CollectFailedException(ordinal, "??Case body does not start with StartTest()");
-         }
-         catch (...)
-         {
-            throw CollectFailedException(ordinal, "???Case body does not start with StartTest()");
-         }
-      }
-
-   };
-
-   void Export(ICaseExporter* exporter)
-   {
-      Iterator it(m_groupListHead, &m_nameFilter);
-      ExportRuntime runtime(exporter, &m_nameFilter);
-
-      while(true)
-      {
-         const Iterator::Event ev = it.Get();
-         if (ev.Type == Iterator::EventType_Done)
-            break;
-
-         if (ev.Type == Iterator::EventType_Group)
-            exporter->OnGroup(ev.Group.Name);
-
-         if (ev.Type == Iterator::EventType_Case)
-            runtime.ExportOneCase(ev.Case.CaseProc, ev.Case.Ordinal);
-
-         it.Next();
-      }
-
-      exporter->OnDone();
-   }
-
-
-private:
    struct Runtime final: IRuntime
    {
       IRunObserver* m_runObserver;
@@ -722,6 +663,62 @@ private:
          }
       }
    };
+
+   struct ExportRuntime final: IRuntime
+   {
+      ICaseExporter*  m_pExporter;
+      Ordinal_t   m_currentTestOrdinal;
+      const char* m_caseNameFilter;
+      CaseProc_t  m_currentCaseProc;
+      NameFilter *m_nameFilter;
+
+
+      ExportRuntime(ICaseExporter* pExporter, NameFilter* nameFilter)
+         : m_pExporter(pExporter), m_nameFilter(nameFilter)
+      {}
+
+      void StartCase(const char* testName, const char* description = nullptr) final
+      {
+         if (m_nameFilter->CaseExcludedByName(testName))
+            throw CaseFiltered();
+
+         ICaseExporter::ExportedCase exportedCase;
+         exportedCase.CaseName = testName;
+         exportedCase.CaseNumber = m_currentTestOrdinal;
+         exportedCase.CaseProc = m_currentCaseProc;
+
+         m_pExporter->OnCase(exportedCase);
+         throw CaseIsReal();
+      }
+
+      void ExportOneCase(CaseProc_t caseProc, Ordinal_t ordinal)
+      {
+         try
+         {
+            m_currentTestOrdinal = ordinal;
+            m_currentCaseProc = caseProc;
+            caseProc(this);
+            throw CollectFailedException(ordinal, "Case body does not start with StartTest()");
+         }
+         catch (const CaseFiltered&)
+         {
+            // filtered out because of case name does not match one specified in Subset filter
+         }
+         catch (const CaseIsReal&)
+         {
+            // Test was exported successfully
+         }
+         catch (std::exception&)
+         {
+            throw CollectFailedException(ordinal, "??Case body does not start with StartTest()");
+         }
+         catch (...)
+         {
+            throw CollectFailedException(ordinal, "???Case body does not start with StartTest()");
+         }
+      }
+   };
+
 
 private:
    // The default progress reporter to stdout. It makes the tested.h usable without any backend.
@@ -795,13 +792,6 @@ struct Storage final: private Subset
       return res;
    }
 
-   Subset ByAddress(std::string_view address) const
-   {
-      Subset res = (*this);
-      res.m_nameFilter.ByAddress(address);
-      return res;
-   }
-
    void AddGroup(GroupListEntry* newGroupEntry)
    {
       if (m_groupListTail == nullptr)
@@ -841,6 +831,10 @@ public:
       {
          CaseListHead = collectCasesProc(nullptr);
          storage.AddGroup(this);
+
+         // ':' reserverd for the idea of having test address, e.g. 'std.vector:push_back'
+         if (strchr(groupName, ':') != nullptr)
+            throw CollectFailedException(0, "Group must not have ':' in the name.");
       }
       catch (CollectFailedException ex)
       {
