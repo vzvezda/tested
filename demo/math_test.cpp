@@ -16,5 +16,5 @@ template<> void tested::Case<CASE_COUNTER>(tested::IRuntime* runner)
 // Linker is not going to include this file unless we reference any symbol from it
 void LinkMathTests()
 {
-   static tested::Group x("math", tested::CaseCollector<CASE_COUNTER>::collect, __FILE__);
+   static tested::Group<CASE_COUNTER> x("math",  __FILE__);
 }

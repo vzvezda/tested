@@ -27,5 +27,5 @@ template<> void tested::Case<CASE_COUNTER>(tested::IRuntime* runner)
 
 void LinkVectorTests()
 {
-   static tested::Group x("std.vector", tested::CaseCollector<CASE_COUNTER>::collect, __FILE__);
+   static tested::Group<CASE_COUNTER> x("std.vector",  __FILE__);
 }

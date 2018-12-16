@@ -27,8 +27,8 @@
 //      leak detector you may want to use for your tests.
 //
 //  TODO:
-//     * tags
 //     * runtime customization 
+//     * tags
 //     * Async tests
 //     * to c++03
 //     * Emscripten demo
@@ -41,11 +41,34 @@
 #include <exception>
 #include <cstddef>
 
+// First, there are some hooks to customize the tested.h for your project needs which you can do
+// without the modification of tested.h itself. 
+namespace tested
+{
+   enum Customized_t { Customized };
+
+   template <Customized_t >
+   struct RuntimeCustomization
+   {
+      typedef void* ExportInitType;
+      typedef void* RunInitType;
+
+      void InitForExport(ExportInitType) {}
+      void InitForRun(RunInitType) {}
+      void InitForCollect() {}
+
+      void OnBeforeCaseProc() {}
+      void OnStartCase(const char* caseName, const char* descripton) {}
+   };
+};
+
 // With C++17 it is possible to make some project specific configuration
 #ifdef __has_include
-#if __has_include("tested_config.h")
-#include "tested_config.h""
+#if __has_include("tested_customize.h")
+#include "tested_customize.h""
 #endif
+#elif defined(TESTED_CUSTOMIZE)
+#include "tested_customize.h""
 #endif
 
 #if __cplusplus <= 199711L
@@ -120,7 +143,7 @@ struct StringStorage
 // This is the runtime API of 'tested' library avaiable to test case via parameter. There are two 
 // private implementation for this interface: one is to collect all test function and another is to 
 // actually run the tests.
-struct IRuntime
+struct IRuntime: RuntimeCustomization<Customized>
 {
    // Any test case must invoke StartCase method in the begining. Use literal or 
    // storage with static lifetime as test name and description because API does not make the 
@@ -818,17 +841,19 @@ struct Storage final: private Subset
 };
 
 // API to define the test group
+template <Ordinal_t N>
 struct Group final: private GroupListEntry
 {
 public:
    Group(const char* groupName, 
-      CaseListEntry* (*collectCasesProc)(CaseListEntry*),
       const char* fileName,
+      CaseListEntry* (*collectCasesProc)(CaseListEntry*) = CaseCollector<N>::collect,
       Storage& storage = Storage::Instance())
       : GroupListEntry(groupName, fileName)
    {
       try
       {
+
          CaseListHead = collectCasesProc(nullptr);
          storage.AddGroup(this);
 
